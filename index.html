@@ -97,6 +97,7 @@
   <!-- TensorFlow.js & Pose Detection (via CDN) -->
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl@4.20.0/dist/tf-backend-webgl.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@4.20.0/dist/tf-backend-wasm.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection@3.8.0/dist/pose-detection.min.js"></script>
 
   <script>
@@ -172,8 +173,21 @@
     // Initialize TF backend and model
     async function loadModel(){
       try{
-        await tf.setBackend('webgl');
-        await tf.ready();
+        // Prefer WebGL, but fall back to WASM on browsers that block WebGL (iOS/Safari Low Power, etc.)
+        let backend = 'webgl';
+        try{
+          await tf.setBackend('webgl');
+          await tf.ready();
+        }catch(e){
+          backend = 'wasm';
+        }
+        if(backend === 'wasm'){
+          // Point WASM to its CDN path before selecting the backend
+          // eslint-disable-next-line no-undef
+          tf.wasm?.setWasmPaths?.('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@4.20.0/dist/');
+          await tf.setBackend('wasm');
+          await tf.ready();
+        }
 
         const model = poseDetection.SupportedModels.MoveNet;
         detector = await poseDetection.createDetector(model, {
@@ -181,6 +195,12 @@
           enableSmoothing: true,
           minPoseScore: 0.15
         });
+        setStatus('--warn',`Model loaded (${tf.getBackend()}) — ready to start`);
+      }catch(err){
+        console.error(err);
+        showError('Failed to load TensorFlow.js or model. Try a modern browser over HTTPS.');
+      }
+    });
         setStatus('--warn','Model loaded — ready to start');
       }catch(err){
         console.error(err);
@@ -307,6 +327,43 @@
 
       const view = drawMirroredVideo();
       if(!view){ rafId = requestAnimationFrame(detectLoop); return; }
+
+      if(!detector){
+        // If detector isn't ready, try to (re)load once more and skip this frame
+        try{ await loadModel(); }catch(e){}
+        rafId = requestAnimationFrame(detectLoop);
+        return;
+      }
+
+      // Estimate poses (max 6 people). Don't flip here; we handle mirroring in drawing.
+      let poses = [];
+      try{
+        poses = await detector.estimatePoses(video, { maxPoses: 6, flipHorizontal: false });
+      }catch(err){
+        console.error(err);
+        showError('Pose detection error: ' + err.message);
+      }
+
+      // Draw skeletons
+      for(let i=0;i<poses.length;i++){
+        const color = COLORS[i % COLORS.length];
+        drawSkeletonForPerson(poses[i], view, color, showKeypointsEl.checked, showBonesEl.checked);
+      }
+
+      // FPS calc
+      const now = performance.now();
+      if(lastFrameTs){
+        const dt = now - lastFrameTs; // ms
+        const fps = 1000 / dt;
+        fpsWindow.push(fps);
+        if(fpsWindow.length > 30) fpsWindow.shift();
+        const avg = fpsWindow.reduce((a,b)=>a+b,0) / fpsWindow.length;
+        if(showFpsEl.checked) drawFps(avg);
+      }
+      lastFrameTs = now;
+
+      rafId = requestAnimationFrame(detectLoop);
+    }
 
       // Estimate poses (max 6 people). Don't flip here; we handle mirroring in drawing.
       let poses = [];
